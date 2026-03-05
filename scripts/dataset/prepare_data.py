@@ -4,6 +4,7 @@ import random
 import argparse
 import tqdm
 import numpy as np
+
 from transformers import AutoTokenizer
 
 # USAGE:

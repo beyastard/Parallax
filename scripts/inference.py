@@ -1,11 +1,13 @@
 import os
 import argparse
 import torch
+
 from torch.amp import autocast
 from safetensors.torch import load_file
 from transformers import AutoTokenizer
-from model import Parallax
-from config import ParallaxConfig
+
+from model.parallax.modeling_parallax import Parallax
+from model.parallax.configuration_parallax import ParallaxConfig
 
 
 def parse_args():
@@ -16,7 +18,7 @@ def parse_args():
                         help="Directory containing model and meta checkpoint files")
     parser.add_argument("--tag",            type=str, default="best",
                         help="Checkpoint tag to load, e.g. 'best' or 'iter_5000'")
-    parser.add_argument("--tokenizer",      type=str, default="meta-llama/Llama-2-7b-hf",
+    parser.add_argument("--tokenizer",      type=str, default="NousResearch/Llama-2-7b-hf",
                         help="HuggingFace tokenizer name or local path")
 
     # Generation

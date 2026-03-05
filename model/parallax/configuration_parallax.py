@@ -4,12 +4,14 @@ from dataclasses import dataclass
 
 @dataclass
 class ParallaxConfig:
-    block_size: int = 512        # Context window
+    block_size: int = 256        # Context window
     vocab_size: int = 32000      # Llama2 default
-    n_layer: int = 6             # Layers PER track
+    n_layer: int = 2             # Layers PER track
     n_head: int = 4
     n_kv_heads: int = 2          # GQA: Grouped Query Attention
-    n_embd: int = 512            # ~40-60M params at 6 layers per track
+    n_embd: int = 256            # ~40-60M params at 6 layers per track
+    ffn_dim: int = 0
+    rope_theta: float = 10000.0
     dropout: float = 0.0         # Start at 0.0; introduce if val loss diverges from train
     bias: bool = False           # Llama-style: no bias in Linear layers (informational)
     num_loops: int = 2           # Passes through each track; swap fires on loops > 1

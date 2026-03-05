@@ -1,0 +1,11 @@
+# If you wish to use this option, enter the following on the command line:
+# pip install -e .
+# Otherwise, run the scripts as a "forced" module as below:
+# > python -m scripts.train --checkpoint_dir checkpoints/parallax_test ...
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "parallax"
+version = "0.1.0"

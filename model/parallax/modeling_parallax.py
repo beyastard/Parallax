@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from config import ParallaxConfig
+from model.parallax.configuration_parallax import ParallaxConfig
 
 def rotate_half(x):
     x1, x2 = x.chunk(2, dim=-1)
@@ -84,7 +84,9 @@ class ParallaxBlock(nn.Module):
     def __init__(self, config: ParallaxConfig):
         super().__init__()
         self.attn = GQAAttention(config)
-        self.ffn = SwiGLU(config.n_embd, int(2/3 * 4 * config.n_embd))
+        #self.ffn = SwiGLU(config.n_embd, int(2/3 * 4 * config.n_embd))
+        ffn_dim = config.ffn_dim if config.ffn_dim > 0 else int(2/3 * 4 * config.n_embd)
+        self.ffn = SwiGLU(config.n_embd, ffn_dim)
         self.norm1 = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.norm2 = RMSNorm(config.n_embd, eps=config.norm_eps)
 
@@ -108,12 +110,12 @@ class Parallax(nn.Module):
 
         # Precompute rotary freqs and register as buffers so they move
         # automatically with model.to(device) / model.cuda()
-        cos, sin = self._precompute_freqs(config.n_embd // config.n_head, config.block_size)
+        cos, sin = self._precompute_freqs(config.n_embd // config.n_head, config.block_size, config.rope_theta)
         self.register_buffer("freqs_cos", cos)
         self.register_buffer("freqs_sin", sin)
 
-    def _precompute_freqs(self, dim, seq_len):
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+    def _precompute_freqs(self, dim, seq_len, rope_theta=10000.0):
+        inv_freq = 1.0 / (rope_theta ** (torch.arange(0, dim, 2).float() / dim))
         t = torch.arange(seq_len)
         freqs = torch.outer(t, inv_freq)       # (S, D/2)
         full_freqs = torch.cat((freqs, freqs), dim=-1)  # (S, D)

@@ -4,12 +4,14 @@ import math
 import argparse
 import torch
 import numpy as np
+
 from torch.amp import GradScaler, autocast
 from safetensors.torch import save_file, load_file as load_safetensors
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
-from model import Parallax
-from config import ParallaxConfig
+
+from model.parallax.modeling_parallax import Parallax
+from model.parallax.configuration_parallax import ParallaxConfig
 
 # Don't forget to run: tensorboard --logdir=logs
 #
@@ -51,7 +53,10 @@ def parse_args():
                         help="Output directory for fine-tuned checkpoints (separate from pre-training)")
     parser.add_argument("--log_dir",         type=str, default="logs/parallax_ft",
                         help="TensorBoard log directory for this fine-tuning run")
-    parser.add_argument("--tokenizer",       type=str, default="NousResearch/Llama-2-7b-hf")
+    parser.add_argument("--tokenizer",       type=str, default=None,
+                        help="Tokenizer path. Defaults to the tokenizer saved alongside\n"
+                             "the base checkpoint (recommended). Falls back to\n"
+                             "NousResearch/Llama-2-7b-hf if not found.")
 
     # --- Forgetting mitigation ---
     parser.add_argument("--anchor_path",     type=str, default=None,
@@ -227,19 +232,38 @@ def main():
         raise FileNotFoundError(f"--anchor_path not found: {args.anchor_path}")
 
     # --- Load tokenizer ---
-    print(f"Loading tokenizer: {args.tokenizer}")
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    # Prefer the tokenizer saved alongside the base checkpoint for consistency.
+    # Falls back to the --tokenizer argument, then to NousResearch as last resort.
+    saved_tokenizer_path = os.path.join(os.path.dirname(args.base_checkpoint), "tokenizer")
+    if args.tokenizer is not None:
+        tokenizer_source = args.tokenizer
+    elif os.path.isdir(saved_tokenizer_path):
+        tokenizer_source = saved_tokenizer_path
+    else:
+        tokenizer_source = "NousResearch/Llama-2-7b-hf"
+        print("  Warning: no saved tokenizer found alongside base checkpoint.")
+        print("  Falling back to NousResearch/Llama-2-7b-hf from HuggingFace.")
+    print(f"Loading tokenizer: {tokenizer_source}")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
 
     # --- Reconstruct config from the saved pre-training meta ---
     meta   = torch.load(args.base_meta, map_location=device, weights_only=False)
-    config = ParallaxConfig(**meta["config"])
+    #config = ParallaxConfig(**meta["config"])
+    valid_fields = ParallaxConfig.__dataclass_fields__.keys()
+    config = ParallaxConfig(**{k: v for k, v in meta["config"].items() if k in valid_fields})
+    config.block_size = 256  # temporary override for memory-constrained fine-tuning
     print(f"Loaded config from: {args.base_meta}")
-    print(f"  Pre-trained at iter {meta['iter']}  |  loss {meta['loss']:.4f}")
+    #print(f"  Pre-trained at iter {meta['iter']}  |  loss {meta['loss']:.4f}")
+    loss_str = f"{meta['loss']:.4f}" if meta['loss'] is not None else "n/a (transplant)"
+    print(f"  Pre-trained at iter {meta['iter']}  |  loss {loss_str}")
 
     # --- Initialise model and load pre-trained weights ---
     model = Parallax(config).to(device)
     state_dict = load_safetensors(args.base_checkpoint)
-    model.load_state_dict(state_dict)
+    #model.load_state_dict(state_dict)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing:
+        print(f"  Note: {len(missing)} keys not in checkpoint (e.g. freqs_cos/sin — expected for transplants)")
     print(f"Loaded weights from: {args.base_checkpoint}")
 
     # --- Optionally freeze token embeddings ---
@@ -346,9 +370,39 @@ def main():
                 args.gen_prompt, args.gen_len, it
             )
 
+    # --- Final eval, checkpoint, tokenizer save and snippet at end of run ---
+    final_iter = args.max_iters - 1
+    print(f"\n--- Final Evaluation (iter {final_iter}) ---")
+    final_val_loss = estimate_loss(
+        model, args.val_path, args.eval_iters,
+        args.batch_size, config.block_size, device
+    )
+    final_lr = get_lr(final_iter, args.warmup_iters, args.max_iters, args.lr)
+    print(f"step {final_iter:6d} | val loss {final_val_loss:.4f} | lr {final_lr:.2e}")
+    writer.add_scalar("Loss/val", final_val_loss, final_iter)
+
+    if final_val_loss < best_val_loss:
+        best_val_loss = final_val_loss
+        save_checkpoint(model, optimizer, final_iter, final_val_loss,
+                        args.checkpoint_dir, config, label="best")
+        print(f"  >>> New best val loss: {best_val_loss:.4f}")
+
+    # Always save a 'final' checkpoint so resuming never loses progress
+    save_checkpoint(model, optimizer, final_iter, final_val_loss,
+                    args.checkpoint_dir, config, label="final")
+
+    # Save tokenizer into the fine-tune checkpoint directory for self-contained inference
+    tokenizer_path = os.path.join(args.checkpoint_dir, "tokenizer")
+    tokenizer.save_pretrained(tokenizer_path)
+    print(f"  Tokenizer saved to: {tokenizer_path}")
+
+    generate_live_snippet(
+        model, tokenizer, device, config,
+        args.gen_prompt, args.gen_len, final_iter
+    )
+
     writer.close()
-    print("Fine-tuning complete.")
-    print(f"Best val loss: {best_val_loss:.4f}")
+    print(f"Fine-tuning complete. Best val loss: {best_val_loss:.4f}")
     print(f"Checkpoints saved to: {args.checkpoint_dir}")
 
 if __name__ == "__main__":

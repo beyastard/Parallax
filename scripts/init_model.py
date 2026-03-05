@@ -2,9 +2,11 @@
 
 import os
 import torch
+
 from safetensors.torch import save_file
-from config import ParallaxConfig
-from model import Parallax
+
+from model.parallax.modeling_parallax import Parallax
+from model.parallax.configuration_parallax import ParallaxConfig
 
 def count_parameters(model):
     total_params = sum(p.numel() for p in model.parameters())
@@ -12,7 +14,7 @@ def count_parameters(model):
     non_emb_params = total_params - model.tok_emb.weight.numel()
     return total_params, non_emb_params
 
-def estimate_vram_usage(model, config):
+def estimate_vram_usage(model):
     # Rough estimate: Weights (FP16) + Optimizer States (AdamW FP32: 2 states per param)
     # FP16 = 2 bytes/param, AdamW FP32 states = 8 bytes/param
     total_params = sum(p.numel() for p in model.parameters())
