@@ -90,32 +90,35 @@ meta["config"]["use_swap"] = False
 meta["config"]["num_loops"] = 1
 
 if args.block_size_override:
-    cfg_dict["block_size"] = args.block_size_override
-    print(f"  block_size overridden → {args.block_size_override}")
+    cfg_dict["max_position_embeddings"] = args.block_size_override
+    print(f"  max_position_embeddings overridden → {args.block_size_override}")
 
 print(f"  Donor:      {meta.get('donor', 'unknown')}")
 print(f"  Arch:       {meta.get('donor_arch', 'unknown')}")
-print(f"  Parallax:   n_layer={cfg_dict['n_layer']}, n_embd={cfg_dict['n_embd']}, "
-      f"n_head={cfg_dict['n_head']}, n_kv_heads={cfg_dict['n_kv_heads']}")
-print(f"  vocab_size: {cfg_dict['vocab_size']},  block_size: {cfg_dict['block_size']}")
+print(f"  Parallax:   num_hidden_layers={cfg_dict.get('num_hidden_layers', cfg_dict.get('n_layer'))}, "
+      f"hidden_size={cfg_dict.get('hidden_size', cfg_dict.get('n_embd'))}, "
+      f"num_attention_heads={cfg_dict.get('num_attention_heads', cfg_dict.get('n_head'))}, "
+      f"num_key_value_heads={cfg_dict.get('num_key_value_heads', cfg_dict.get('n_kv_heads'))}")
+print(f"  vocab_size: {cfg_dict['vocab_size']},  "
+      f"max_position_embeddings: {cfg_dict.get('max_position_embeddings', cfg_dict.get('block_size'))}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Build Parallax model from transplant config
 # ─────────────────────────────────────────────────────────────────────────────
 sys.path.insert(0, os.getcwd())
 try:
-    from model.config import ParallaxConfig
-    from model.model import Parallax
+    from model.parallax import ParallaxConfig, ParallaxForCausalLM
 except ImportError as e:
     print(f"\nERROR: Cannot import Parallax — run from your project directory.\n({e})")
     sys.exit(1)
 
-# Only pass fields that ParallaxConfig actually accepts
-valid_fields = ParallaxConfig.__dataclass_fields__.keys()
-config = ParallaxConfig(**{k: v for k, v in cfg_dict.items() if k in valid_fields})
+# ParallaxConfig accepts both old-style (legacy field names) and new-style
+# (HF field names) config dicts via its legacy alias kwargs, so this works
+# for both pre-refactor and post-refactor transplant checkpoints.
+config = ParallaxConfig(**cfg_dict)
 
 print(f"\n  Building Parallax model...")
-model = Parallax(config)
+model = ParallaxForCausalLM(config)
 total_params = sum(p.numel() for p in model.parameters())
 print(f"  Parameters: {total_params/1e6:.2f}M")
 
@@ -278,8 +281,8 @@ input_ids  = tokenizer.encode(formatted, return_tensors="pt").to(device)
 prompt_len = input_ids.shape[1]
 print(f"(prompt length: {prompt_len} tokens)\n")
 
-if prompt_len >= config.block_size:
-    print(f"⚠  Prompt ({prompt_len} tokens) >= block_size ({config.block_size}).")
+if prompt_len >= config.max_position_embeddings:
+    print(f"⚠  Prompt ({prompt_len} tokens) >= max_position_embeddings ({config.max_position_embeddings}).")
     print(f"   Use --block_size_override N to increase, or shorten the prompt.")
 
 generated     = input_ids.clone()
@@ -287,7 +290,7 @@ recent_tokens = []
 
 with torch.no_grad():
     for step in range(args.max_new_tokens):
-        ctx = generated[:, -config.block_size:]
+        ctx = generated[:, -config.max_position_embeddings:]
 
         with torch.amp.autocast(
             device_type=device.split(":")[0],

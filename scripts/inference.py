@@ -6,8 +6,7 @@ from torch.amp import autocast
 from safetensors.torch import load_file
 from transformers import AutoTokenizer
 
-from model.parallax.modeling_parallax import Parallax
-from model.parallax.configuration_parallax import ParallaxConfig
+from model.parallax import ParallaxConfig, ParallaxForCausalLM
 
 
 def parse_args():
@@ -18,8 +17,9 @@ def parse_args():
                         help="Directory containing model and meta checkpoint files")
     parser.add_argument("--tag",            type=str, default="best",
                         help="Checkpoint tag to load, e.g. 'best' or 'iter_5000'")
-    parser.add_argument("--tokenizer",      type=str, default="NousResearch/Llama-2-7b-hf",
-                        help="HuggingFace tokenizer name or local path")
+    parser.add_argument("--tokenizer",      type=str, default=None,
+                        help="HuggingFace tokenizer name or local path. Defaults to the "
+                             "tokenizer saved alongside the checkpoint.")
 
     # Generation
     parser.add_argument("--prompt",         type=str,   default="Once upon a time, there was a little bird named")
@@ -42,7 +42,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, confi
     eos_id = tokenizer.eos_token_id
 
     for _ in range(max_new_tokens):
-        x_cond = x[:, -config.block_size:]
+        x_cond = x[:, -config.max_position_embeddings:]
 
         with autocast(device_type=device_type, dtype=torch.float16):
             logits, _ = model(x_cond)
@@ -76,22 +76,52 @@ def main():
     weights_path = os.path.join(args.checkpoint_dir, f"model_{args.tag}.safetensors")
     meta_path    = os.path.join(args.checkpoint_dir, f"meta_{args.tag}.pt")
 
+    for path, name in [(weights_path, "weights"), (meta_path, "meta")]:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"{name} file not found: {path}")
+
     # --- 1. Load metadata and reconstruct config ---
     # weights_only=False is required because the meta file contains a plain dict
-    # with non-tensor values (iter, loss, optimizer state, config dict)
+    # with non-tensor values (iter, loss, optimizer state, config dict).
+    # ParallaxConfig accepts both old-style (legacy field names) and new-style
+    # (HF field names) meta dicts via its legacy alias kwargs.
     meta   = torch.load(meta_path, map_location=device, weights_only=False)
-    config = ParallaxConfig(**meta['config'])
+    config = ParallaxConfig(**meta["config"])
 
-    print(f"Loaded checkpoint '{args.tag}'  |  iter {meta['iter']}  |  loss {meta['loss']:.4f}")
+    loss_str = f"{meta['loss']:.4f}" if meta.get("loss") is not None else "n/a"
+    print(f"Loaded checkpoint '{args.tag}'  |  iter {meta['iter']}  |  loss {loss_str}")
+    print(f"  hidden_size={config.hidden_size}, "
+          f"num_hidden_layers={config.num_hidden_layers}, "
+          f"num_attention_heads={config.num_attention_heads}, "
+          f"num_key_value_heads={config.num_key_value_heads}, "
+          f"max_position_embeddings={config.max_position_embeddings}")
 
     # --- 2. Load tokenizer ---
-    print(f"Loading tokenizer: {args.tokenizer}")
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    # Prefer the tokenizer saved alongside the checkpoint; fall back to --tokenizer
+    # argument, then to NousResearch as a last resort.
+    saved_tokenizer_path = os.path.join(args.checkpoint_dir, "tokenizer")
+    if args.tokenizer is not None:
+        tokenizer_source = args.tokenizer
+    elif os.path.isdir(saved_tokenizer_path):
+        tokenizer_source = saved_tokenizer_path
+    else:
+        tokenizer_source = "NousResearch/Llama-2-7b-hf"
+        print("  Warning: no saved tokenizer found alongside checkpoint.")
+        print("  Falling back to NousResearch/Llama-2-7b-hf from HuggingFace.")
+    print(f"Loading tokenizer: {tokenizer_source}")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
 
     # --- 3. Initialise model and load weights ---
-    model = Parallax(config).to(device)
+    model = ParallaxForCausalLM(config).to(device)
     state_dict = load_file(weights_path)
-    model.load_state_dict(state_dict)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing:
+        non_freq = [k for k in missing
+                    if k not in ("model.freqs_cos", "model.freqs_sin")]
+        if non_freq:
+            print(f"  Warning: {len(non_freq)} unexpected missing keys:")
+            for k in non_freq[:5]:
+                print(f"    {k}")
     model.eval()
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")

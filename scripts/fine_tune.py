@@ -10,8 +10,7 @@ from safetensors.torch import save_file, load_file as load_safetensors
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 
-from model.parallax.modeling_parallax import Parallax
-from model.parallax.configuration_parallax import ParallaxConfig
+from model.parallax import ParallaxConfig, ParallaxForCausalLM
 
 # Don't forget to run: tensorboard --logdir=logs
 #
@@ -23,7 +22,7 @@ from model.parallax.configuration_parallax import ParallaxConfig
 #                       --train_path     data/new_dataset/train.bin \
 #                       --val_path       data/new_dataset/val.bin
 #
-# With catastrophic forgetting mitigation (30% TinyStories mixed in):
+# With catastrophic forgetting mitigation (30% original data mixed in):
 #   python fine_tune.py ... --anchor_path data/train.bin --mix_ratio 0.3
 #
 # With frozen embeddings:
@@ -50,7 +49,7 @@ def parse_args():
     parser.add_argument("--val_path",        type=str, required=True,
                         help="Tokenized .bin file for fine-tuning validation data")
     parser.add_argument("--checkpoint_dir",  type=str, default="checkpoints/parallax_v1_ft",
-                        help="Output directory for fine-tuned checkpoints (separate from pre-training)")
+                        help="Output directory for fine-tuned checkpoints")
     parser.add_argument("--log_dir",         type=str, default="logs/parallax_ft",
                         help="TensorBoard log directory for this fine-tuning run")
     parser.add_argument("--tokenizer",       type=str, default=None,
@@ -60,36 +59,33 @@ def parse_args():
 
     # --- Forgetting mitigation ---
     parser.add_argument("--anchor_path",     type=str, default=None,
-                        help="Tokenized .bin of the original pre-training data (e.g. TinyStories). "
-                             "When provided, a fraction of each batch is drawn from this file "
-                             "to reduce catastrophic forgetting.")
+                        help="Tokenized .bin of the original pre-training data. "
+                             "When provided, a fraction of each batch is drawn from this "
+                             "file to reduce catastrophic forgetting.")
     parser.add_argument("--mix_ratio",       type=float, default=0.2,
                         help="Fraction of each batch drawn from --anchor_path (default: 0.2). "
                              "Ignored if --anchor_path is not set.")
 
     # --- Fine-tuning hyperparameters ---
-    # Defaults are deliberately more conservative than pre-training
     parser.add_argument("--batch_size",      type=int,   default=4)
     parser.add_argument("--grad_accum",      type=int,   default=8)
     parser.add_argument("--lr",              type=float, default=1e-4,
                         help="Peak learning rate. Lower than pre-training default (6e-4) "
                              "to avoid overwriting learned representations.")
     parser.add_argument("--weight_decay",    type=float, default=0.1)
-    parser.add_argument("--max_iters",       type=int,   default=20000,
-                        help="Total fine-tuning steps (shorter than pre-training by default)")
+    parser.add_argument("--max_iters",       type=int,   default=20000)
     parser.add_argument("--warmup_iters",    type=int,   default=200,
-                        help="Short warmup since we're starting from a good set of weights")
+                        help="Short warmup since we start from a good set of weights")
 
     # --- Embedding freeze ---
     parser.add_argument("--freeze_embeddings", action="store_true",
-                        help="Freeze tok_emb weights during fine-tuning to preserve the "
+                        help="Freeze embed_tokens weights during fine-tuning to preserve "
                              "token representations built during pre-training")
 
     # --- Evaluation & logging ---
     parser.add_argument("--eval_interval",   type=int,   default=100)
     parser.add_argument("--eval_iters",      type=int,   default=50)
-    parser.add_argument("--save_interval",   type=int,   default=500,
-                        help="Periodic snapshot interval (shorter than pre-training default)")
+    parser.add_argument("--save_interval",   type=int,   default=500)
     parser.add_argument("--log_interval",    type=int,   default=10)
 
     # --- Generation ---
@@ -115,12 +111,12 @@ def get_batch(data_path, batch_size, block_size, device):
 
 def get_mixed_batch(ft_path, anchor_path, batch_size, block_size, device, mix_ratio):
     """
-    Draw a batch that blends fine-tuning data and anchor (pre-training) data.
-    mix_ratio controls the fraction of samples drawn from the anchor dataset.
+    Draw a batch blending fine-tuning data and anchor (pre-training) data.
+    mix_ratio controls the fraction of samples from the anchor dataset.
     e.g. mix_ratio=0.2 means 1 in 5 samples comes from the anchor.
     """
     anchor_count = max(1, round(batch_size * mix_ratio))
-    ft_count = batch_size - anchor_count
+    ft_count     = batch_size - anchor_count
 
     x_ft,     y_ft     = get_batch(ft_path,     ft_count,     block_size, device)
     x_anchor, y_anchor = get_batch(anchor_path, anchor_count, block_size, device)
@@ -131,7 +127,7 @@ def get_mixed_batch(ft_path, anchor_path, batch_size, block_size, device, mix_ra
 
 
 # ---------------------------------------------------------------------------
-# LR schedule: short linear warmup → cosine decay → 10% floor
+# LR schedule: short linear warmup -> cosine decay -> 10% floor
 # ---------------------------------------------------------------------------
 
 def get_lr(it, warmup_iters, max_iters, base_lr):
@@ -176,7 +172,7 @@ def generate_live_snippet(model, tokenizer, device, config, prompt, gen_len, cur
 
     generated = []
     for _ in range(gen_len):
-        x_cond = x[:, -config.block_size:]
+        x_cond = x[:, -config.max_position_embeddings:]
         with autocast(device_type=device_type, dtype=torch.float16):
             logits, _ = model(x_cond)
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
@@ -202,7 +198,7 @@ def save_checkpoint(model, optimizer, it, loss, checkpoint_dir, config, label=No
         "iter":      it,
         "loss":      loss,
         "optimizer": optimizer.state_dict(),
-        "config":    config.__dict__,
+        "config":    config.to_dict(),
     }
     torch.save(meta, os.path.join(checkpoint_dir, f"meta_{tag}.pt"))
     print(f"  Checkpoint saved: {tag}  (loss {loss:.4f})")
@@ -233,7 +229,6 @@ def main():
 
     # --- Load tokenizer ---
     # Prefer the tokenizer saved alongside the base checkpoint for consistency.
-    # Falls back to the --tokenizer argument, then to NousResearch as last resort.
     saved_tokenizer_path = os.path.join(os.path.dirname(args.base_checkpoint), "tokenizer")
     if args.tokenizer is not None:
         tokenizer_source = args.tokenizer
@@ -246,43 +241,58 @@ def main():
     print(f"Loading tokenizer: {tokenizer_source}")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
 
-    # --- Reconstruct config from the saved pre-training meta ---
-    meta   = torch.load(args.base_meta, map_location=device, weights_only=False)
-    #config = ParallaxConfig(**meta["config"])
-    valid_fields = ParallaxConfig.__dataclass_fields__.keys()
-    config = ParallaxConfig(**{k: v for k, v in meta["config"].items() if k in valid_fields})
-    config.block_size = 256  # temporary override for memory-constrained fine-tuning
+    # --- Reconstruct config from saved meta ---
+    meta = torch.load(args.base_meta, map_location=device, weights_only=False)
+
+    # Support both old-style checkpoints (config.__dict__ with legacy field names)
+    # and new-style checkpoints (config.to_dict() with HF field names).
+    # ParallaxConfig accepts both via its legacy alias kwargs.
+    config = ParallaxConfig(**meta["config"])
+
     print(f"Loaded config from: {args.base_meta}")
-    #print(f"  Pre-trained at iter {meta['iter']}  |  loss {meta['loss']:.4f}")
-    loss_str = f"{meta['loss']:.4f}" if meta['loss'] is not None else "n/a (transplant)"
+    loss_str = f"{meta['loss']:.4f}" if meta.get('loss') is not None else "n/a (transplant)"
     print(f"  Pre-trained at iter {meta['iter']}  |  loss {loss_str}")
+    print(f"  hidden_size={config.hidden_size}, "
+          f"num_hidden_layers={config.num_hidden_layers}, "
+          f"num_attention_heads={config.num_attention_heads}, "
+          f"num_key_value_heads={config.num_key_value_heads}")
+    print(f"  max_position_embeddings={config.max_position_embeddings}, "
+          f"vocab_size={config.vocab_size}")
 
     # --- Initialise model and load pre-trained weights ---
-    model = Parallax(config).to(device)
+    model = ParallaxForCausalLM(config).to(device)
     state_dict = load_safetensors(args.base_checkpoint)
-    #model.load_state_dict(state_dict)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
-        print(f"  Note: {len(missing)} keys not in checkpoint (e.g. freqs_cos/sin — expected for transplants)")
+        # freqs_cos/sin are computed buffers — always absent from safetensors files
+        non_freq = [k for k in missing
+                    if k not in ("model.freqs_cos", "model.freqs_sin")]
+        if non_freq:
+            print(f"  Warning: {len(non_freq)} unexpected missing keys:")
+            for k in non_freq[:5]:
+                print(f"    {k}")
+        else:
+            print(f"  Note: {len(missing)} computed buffer(s) absent from checkpoint "
+                  f"(freqs_cos/sin — expected)")
     print(f"Loaded weights from: {args.base_checkpoint}")
 
     # --- Optionally freeze token embeddings ---
     if args.freeze_embeddings:
-        model.tok_emb.weight.requires_grad = False
+        model.model.embed_tokens.weight.requires_grad = False
         print("Token embeddings frozen.")
 
-    total_params    = sum(p.numel() for p in model.parameters())
+    total_params     = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total parameters:     {total_params / 1e6:.2f}M")
     print(f"Trainable parameters: {trainable_params / 1e6:.2f}M")
 
-    # --- Fresh optimizer (intentionally not restoring pre-training momentum) ---
-    # Restoring AdamW state from pre-training would carry over gradient history
-    # from a different data distribution, which destabilises early fine-tuning steps.
+    # --- Fresh optimizer ---
+    # Intentionally not restoring pre-training momentum: AdamW state from a
+    # different data distribution destabilises early fine-tuning steps.
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
     )
     scaler = GradScaler(enabled=(device_type == 'cuda'))
 
@@ -306,6 +316,7 @@ def main():
 
     # --- Fine-tuning loop ---
     best_val_loss = float('inf')
+    block_size    = config.max_position_embeddings
 
     for it in range(args.max_iters):
         t0 = time.time()
@@ -321,10 +332,10 @@ def main():
             if args.anchor_path:
                 x, y = get_mixed_batch(
                     args.train_path, args.anchor_path,
-                    args.batch_size, config.block_size, device, args.mix_ratio
+                    args.batch_size, block_size, device, args.mix_ratio,
                 )
             else:
-                x, y = get_batch(args.train_path, args.batch_size, config.block_size, device)
+                x, y = get_batch(args.train_path, args.batch_size, block_size, device)
 
             with autocast(device_type=device_type, dtype=torch.float16):
                 _, loss = model(x, y)
@@ -343,7 +354,7 @@ def main():
         if it % args.eval_interval == 0:
             val_loss = estimate_loss(
                 model, args.val_path, args.eval_iters,
-                args.batch_size, config.block_size, device
+                args.batch_size, block_size, device,
             )
             print(f"step {it:6d} | train loss {accum_loss:.4f} | val loss {val_loss:.4f} "
                   f"| lr {lr:.2e} | {dt_ms:.1f}ms")
@@ -367,15 +378,15 @@ def main():
         if it % args.generate_every == 0:
             generate_live_snippet(
                 model, tokenizer, device, config,
-                args.gen_prompt, args.gen_len, it
+                args.gen_prompt, args.gen_len, it,
             )
 
-    # --- Final eval, checkpoint, tokenizer save and snippet at end of run ---
+    # --- Final eval, checkpoint, tokenizer save and snippet ---
     final_iter = args.max_iters - 1
     print(f"\n--- Final Evaluation (iter {final_iter}) ---")
     final_val_loss = estimate_loss(
         model, args.val_path, args.eval_iters,
-        args.batch_size, config.block_size, device
+        args.batch_size, block_size, device,
     )
     final_lr = get_lr(final_iter, args.warmup_iters, args.max_iters, args.lr)
     print(f"step {final_iter:6d} | val loss {final_val_loss:.4f} | lr {final_lr:.2e}")
@@ -387,23 +398,22 @@ def main():
                         args.checkpoint_dir, config, label="best")
         print(f"  >>> New best val loss: {best_val_loss:.4f}")
 
-    # Always save a 'final' checkpoint so resuming never loses progress
     save_checkpoint(model, optimizer, final_iter, final_val_loss,
                     args.checkpoint_dir, config, label="final")
 
-    # Save tokenizer into the fine-tune checkpoint directory for self-contained inference
     tokenizer_path = os.path.join(args.checkpoint_dir, "tokenizer")
     tokenizer.save_pretrained(tokenizer_path)
     print(f"  Tokenizer saved to: {tokenizer_path}")
 
     generate_live_snippet(
         model, tokenizer, device, config,
-        args.gen_prompt, args.gen_len, final_iter
+        args.gen_prompt, args.gen_len, final_iter,
     )
 
     writer.close()
     print(f"Fine-tuning complete. Best val loss: {best_val_loss:.4f}")
     print(f"Checkpoints saved to: {args.checkpoint_dir}")
+
 
 if __name__ == "__main__":
     main()

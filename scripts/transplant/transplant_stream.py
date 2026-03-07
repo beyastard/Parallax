@@ -70,8 +70,13 @@ parser.add_argument("--track_prefix", default=None,
          "Set manually if auto-detection fails (e.g. 'tracks' if keys are 'tracks.0.layers...')")
 parser.add_argument("--num_loops", type=int, default=2,
     help="Parallax num_loops (default 2)")
-parser.add_argument("--use_swap", type=lambda x: x.lower() != 'false', default=True,
-    help="Parallax use_swap (default True)")
+#parser.add_argument("--use_swap", type=lambda x: x.lower() != 'false', default=True,
+#    help="Parallax use_swap (default True)")
+parser.add_argument("--use_swap",
+    type=lambda x: x.lower() not in ("false", "0", "no"),
+    default=None,
+    metavar="BOOL",
+    help="Enable track swap (default: True). Pass false/0/no to disable.")
 parser.add_argument("--transplant_mode", default="interleave",
     choices=["interleave", "linear"],
     help="interleave: odd→A, even→B. linear: first half→A, second half→B")
@@ -145,7 +150,7 @@ print(f"  vocab_size:           {DONOR_VOCAB}")
 print(f"  rms_norm_eps:         {DONOR_NORM_EPS}")
 print(f"  rope_theta:           {DONOR_ROPE_BASE}")
 print()
-print(f"  → Parallax n_layer per track: {PARALLAX_N_LAYER}")
+print(f"  → Parallax num_hidden_layers per track: {PARALLAX_N_LAYER}")
 if ODD_LAYERS:
     print(f"  → Odd donor layer count: final layer goes to Track A only")
     if args.copy_odd_to_even:
@@ -245,16 +250,16 @@ print(f"  QKV format: {'combined qkv_proj' if has_combined_qkv else 'separate q/
 print("\n  Step 3: Detecting Parallax key naming...")
 
 # Defaults — overridden by probe or manual flag below
-TRACK_A_PREFIX = "track_a"
-TRACK_B_PREFIX = "track_b"
+TRACK_A_PREFIX = "model.track_a"
+TRACK_B_PREFIX = "model.track_b"
 ATTN_KEY       = "attn"
 FFN_KEY        = "ffn"
 WQ_KEY = "wq";  WK_KEY = "wk";  WV_KEY = "wv";  WO_KEY = "wo"
 W1_KEY = "w1";  W2_KEY = "w2";  W3_KEY = "w3"
 NORM_ATTN_KEY  = "norm1"
 NORM_FFN_KEY   = "norm2"
-EMBED_KEY      = "tok_emb.weight"   # token embedding key in Parallax
-OUTPUT_NORM_KEY = "output_norm.weight"  # final pre-head norm key in Parallax
+EMBED_KEY       = "model.embed_tokens.weight"   # token embedding key in Parallax
+OUTPUT_NORM_KEY = "model.output_norm.weight"     # final pre-head norm key in Parallax
 
 if args.track_prefix:
     TRACK_A_PREFIX = f"{args.track_prefix}.0"
@@ -263,14 +268,13 @@ if args.track_prefix:
 else:
     try:
         sys.path.insert(0, os.getcwd())
-        from config import ParallaxConfig
-        from model import Parallax
+        from model.parallax import ParallaxConfig, ParallaxForCausalLM
 
         probe_cfg = ParallaxConfig(
-            n_layer=1, n_head=2, n_kv_heads=1, n_embd=8,
-            block_size=8, vocab_size=32
+            num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1,
+            hidden_size=8, max_position_embeddings=8, vocab_size=32
         )
-        probe      = Parallax(probe_cfg)
+        probe      = ParallaxForCausalLM(probe_cfg)
         probe_keys = list(probe.state_dict().keys())
         del probe
         gc.collect()
@@ -280,15 +284,15 @@ else:
             print(f"    {k}")
 
         # ── detect embedding key ──────────────────────────────────────────────
-        for candidate in ["tok_emb.weight", "embedding.weight",
-                          "embed_tokens.weight", "wte.weight"]:
+        for candidate in ["model.embed_tokens.weight", "tok_emb.weight",
+                          "embedding.weight", "wte.weight"]:
             if candidate in probe_keys:
                 EMBED_KEY = candidate
                 break
 
         # ── detect output norm key ────────────────────────────────────────────
-        for candidate in ["output_norm.weight", "norm.weight",
-                          "final_norm.weight", "ln_f.weight"]:
+        for candidate in ["model.output_norm.weight", "output_norm.weight",
+                          "model.norm.weight", "final_norm.weight", "ln_f.weight"]:
             if candidate in probe_keys:
                 OUTPUT_NORM_KEY = candidate
                 break
@@ -399,8 +403,12 @@ print(f"\n  Interleave plan ({DONOR_LAYERS} donor layers → {PARALLAX_N_LAYER} 
 print(f"  {'Donor':>6} │ {'Track':>7} │ {'Parallax Layer':>14}")
 print(f"  {'─'*6}─┼─{'─'*7}─┼─{'─'*14}")
 for i in range(DONOR_LAYERS):
-    track  = "A" if i % 2 == 0 else "B"
-    player = i // 2
+    if args.transplant_mode == "interleave":
+        track  = "A" if i % 2 == 0 else "B"
+        player = i // 2
+    else:
+        track  = "A" if i < DONOR_LAYERS // 2 else "B"
+        player = i if track == "A" else i - (DONOR_LAYERS // 2)
     print(f"  {i:>6} │ {'Track '+track:>7} │ {player:>14}")
 if ODD_LAYERS and args.copy_odd_to_even:
     print(f"  (final Track A layer {PARALLAX_N_LAYER-1} also copied to Track B {PARALLAX_N_LAYER-1})")
@@ -534,28 +542,26 @@ meta = {
     "donor_layers":      DONOR_LAYERS,
     "parallax_n_layer":  PARALLAX_N_LAYER,
     "config": {
-        #"block_size":  donor_cfg.get("max_position_embeddings", 2048),
-        "block_size":  min(donor_cfg.get("max_position_embeddings", 2048), 2048),
-        "vocab_size":  DONOR_VOCAB,
-        "n_layer":     PARALLAX_N_LAYER,
-        "n_head":      DONOR_HEADS,
-        "n_kv_heads":  DONOR_KV_HEADS,
-        "n_embd":      DONOR_HIDDEN,
-        "ffn_dim":     DONOR_INTERMEDIATE,
-        "rope_theta":  DONOR_ROPE_BASE,
-        "dropout":     0.0,
-        "bias":        False,
-        "num_loops":   args.num_loops,
-        "use_swap":    args.use_swap,
-        "activation":  "swiglu",
-        "norm_eps":    DONOR_NORM_EPS,
+        "max_position_embeddings": min(donor_cfg.get("max_position_embeddings", 2048), 2048),
+        "vocab_size":              DONOR_VOCAB,
+        "num_hidden_layers":       PARALLAX_N_LAYER,
+        "num_attention_heads":     DONOR_HEADS,
+        "num_key_value_heads":     DONOR_KV_HEADS,
+        "hidden_size":             DONOR_HIDDEN,
+        "intermediate_size":       DONOR_INTERMEDIATE,
+        "rope_theta":              DONOR_ROPE_BASE,
+        "attention_dropout":       0.0,
+        "attention_bias":          False,
+        "num_loops":               args.num_loops,
+        "use_swap":                args.use_swap,
+        "hidden_act":              "swiglu",
+        "rms_norm_eps":            DONOR_NORM_EPS,
     },
     "iter":  0,
     "loss":  None,
     "key_map": {
         "track_a_prefix":  TRACK_A_PREFIX,
         "track_b_prefix":  TRACK_B_PREFIX,
-
         "attn_key":        ATTN_KEY,
         "ffn_key":         FFN_KEY,
         "wq": WQ_KEY, "wk": WK_KEY, "wv": WV_KEY, "wo": WO_KEY,
@@ -569,18 +575,20 @@ print(f"  Meta saved.")
 print("\n" + "=" * 70)
 print("  Transplant complete.")
 print()
-print("  Required config.py settings for this transplant:")
+print("  Parallax config for this transplant:")
 cfg = meta["config"]
 for k, v in cfg.items():
-    print(f"    {k:15s} = {v}")
+    print(f"    {k:30s} = {v}")
 print()
 print("  Verify key loading:")
-print("    python inference_transplant.py \\")
+print("    python scripts/tools/gen_inference.py \\")
 print(f"      --checkpoint {args.output} \\")
-print(f'      --prompt "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\\n\\nHello<|eot_id|><|start_header_id|>assistant<|end_header_id|>\\n\\n"')
+print(f'      --prompt "Once upon a time"')
 print()
-print("  Fine-tune (requires matching config.py set as above):")
-print("    python fine_tune.py \\")
-print(f"      --base {args.output}/model_transplant.safetensors \\")
-print("      --lr 1e-5 --warmup_iters 200 --max_iters 2000")
+print("  Fine-tune:")
+print("    python scripts/fine_tune.py \\")
+print(f"      --base_checkpoint {args.output}/model_transplant.safetensors \\")
+print(f"      --base_meta {args.output}/meta_transplant.pt \\")
+print("      --train_path data/train.bin --val_path data/val.bin \\")
+print("      --lr 1e-4 --warmup_iters 200 --max_iters 5000")
 print("=" * 70)

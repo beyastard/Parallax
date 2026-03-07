@@ -10,8 +10,7 @@ from safetensors.torch import save_file
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 
-from model.parallax.modeling_parallax import Parallax
-from model.parallax.configuration_parallax import ParallaxConfig
+from model.parallax import ParallaxConfig, ParallaxForCausalLM
 
 # Don't forget to run: tensorboard --logdir=logs
 
@@ -25,6 +24,21 @@ def parse_args():
     parser.add_argument("--log_dir",         type=str, default="logs/parallax_experiment")
     parser.add_argument("--tokenizer",       type=str, default="NousResearch/Llama-2-7b-hf",
                         help="HuggingFace tokenizer name or local path (must match prepare_data.py)")
+
+    # Model hyperparameters (override ParallaxConfig defaults)
+    parser.add_argument("--hidden_size",             type=int,   default=None)
+    parser.add_argument("--num_hidden_layers",       type=int,   default=None)
+    parser.add_argument("--num_attention_heads",     type=int,   default=None)
+    parser.add_argument("--num_key_value_heads",     type=int,   default=None)
+    parser.add_argument("--intermediate_size",       type=int,   default=None)
+    parser.add_argument("--max_position_embeddings", type=int,   default=None)
+    parser.add_argument("--vocab_size",              type=int,   default=None)
+    parser.add_argument("--num_loops",               type=int,   default=None)
+    parser.add_argument("--use_swap",
+                        type=lambda x: x.lower() not in ("false", "0", "no"),
+                        default=None,
+                        metavar="BOOL",
+                        help="Enable track swap (default: True). Pass false/0/no to disable.")
 
     # Training hyperparameters
     parser.add_argument("--batch_size",      type=int,   default=4)
@@ -67,7 +81,7 @@ def get_batch(data_path, batch_size, block_size, device):
 
 
 # ---------------------------------------------------------------------------
-# LR schedule: linear warmup → cosine decay → 10% floor
+# LR schedule: linear warmup -> cosine decay -> 10% floor
 # ---------------------------------------------------------------------------
 
 def get_lr(it, warmup_iters, max_iters, base_lr):
@@ -114,7 +128,7 @@ def generate_live_snippet(model, tokenizer, device, config, prompt, gen_len, cur
 
     generated = []
     for _ in range(gen_len):
-        x_cond = x[:, -config.block_size:]
+        x_cond = x[:, -config.max_position_embeddings:]
         with autocast(device_type=device_type, dtype=torch.float16):
             logits, _ = model(x_cond)
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
@@ -136,12 +150,13 @@ def save_checkpoint(model, optimizer, it, loss, checkpoint_dir, config, label=No
     tag = label if label else f"iter_{it}"
     weights_path = os.path.join(checkpoint_dir, f"model_{tag}.safetensors")
     save_file(model.state_dict(), weights_path)
-    # Save config as a plain dict to avoid import-path dependencies at load time
+    # Use config.to_dict() (PretrainedConfig method) — captures all canonical
+    # HF fields correctly without doubling up legacy-alias properties.
     meta = {
         "iter":      it,
         "loss":      loss,
         "optimizer": optimizer.state_dict(),
-        "config":    config.__dict__,
+        "config":    config.to_dict(),
     }
     torch.save(meta, os.path.join(checkpoint_dir, f"meta_{tag}.pt"))
     print(f"  Checkpoint saved: {tag}  (loss {loss:.4f})")
@@ -163,13 +178,35 @@ def main():
     print(f"Loading tokenizer: {args.tokenizer}")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
 
+    # --- Build config, applying any CLI overrides ---
+    # Collect only args that were explicitly set (non-None) so ParallaxConfig
+    # defaults are not silently overwritten when the flag is absent.
+    cfg_overrides = {k: v for k, v in {
+        "hidden_size":             args.hidden_size,
+        "num_hidden_layers":       args.num_hidden_layers,
+        "num_attention_heads":     args.num_attention_heads,
+        "num_key_value_heads":     args.num_key_value_heads,
+        "intermediate_size":       args.intermediate_size,
+        "max_position_embeddings": args.max_position_embeddings,
+        "vocab_size":              args.vocab_size,
+        "num_loops":               args.num_loops,
+        "use_swap":                args.use_swap,
+    }.items() if v is not None}
+
+    config = ParallaxConfig(**cfg_overrides)
+
     # --- Model ---
-    config = ParallaxConfig()
-    model = Parallax(config).to(device)
+    model = ParallaxForCausalLM(config).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Starting Parallax training on {device}")
-    print(f"Model parameters: {total_params / 1e6:.2f}M")
-    print(f"Effective batch size: {args.batch_size * args.grad_accum}")
+    print(f"Model parameters:        {total_params / 1e6:.2f}M")
+    print(f"hidden_size:             {config.hidden_size}")
+    print(f"num_hidden_layers:       {config.num_hidden_layers}  (per track)")
+    print(f"num_attention_heads:     {config.num_attention_heads}")
+    print(f"num_key_value_heads:     {config.num_key_value_heads}")
+    print(f"max_position_embeddings: {config.max_position_embeddings}")
+    print(f"num_loops:               {config.num_loops}  (use_swap={config.use_swap})")
+    print(f"Effective batch size:    {args.batch_size * args.grad_accum}")
 
     # --- Optimizer & AMP scaler ---
     optimizer = torch.optim.AdamW(
@@ -198,7 +235,10 @@ def main():
 
         # Gradient accumulation
         for _ in range(args.grad_accum):
-            x, y = get_batch(args.train_path, args.batch_size, config.block_size, device)
+            x, y = get_batch(
+                args.train_path, args.batch_size,
+                config.max_position_embeddings, device,
+            )
             with autocast(device_type=device_type, dtype=torch.float16):
                 _, loss = model(x, y)
                 loss = loss / args.grad_accum
@@ -217,7 +257,7 @@ def main():
         if it % args.eval_interval == 0:
             val_loss = estimate_loss(
                 model, args.val_path, args.eval_iters,
-                args.batch_size, config.block_size, device
+                args.batch_size, config.max_position_embeddings, device,
             )
             print(f"step {it:6d} | train loss {accum_loss:.4f} | val loss {val_loss:.4f} "
                   f"| lr {lr:.2e} | {dt_ms:.1f}ms")
@@ -232,7 +272,7 @@ def main():
                                 args.checkpoint_dir, config, label="best")
                 print(f"  >>> New best val loss: {best_val_loss:.4f}")
 
-        # --- Periodic snapshot (independent of eval — runs even on eval iterations) ---
+        # --- Periodic snapshot ---
         if it % args.save_interval == 0 and it > 0:
             save_checkpoint(model, optimizer, it, accum_loss,
                             args.checkpoint_dir, config)
@@ -245,17 +285,15 @@ def main():
         if it % args.generate_every == 0:
             generate_live_snippet(
                 model, tokenizer, device, config,
-                args.gen_prompt, args.gen_len, it
+                args.gen_prompt, args.gen_len, it,
             )
 
-    # --- Final eval, snippet and checkpoint at end of run ---
-    # Runs unconditionally so the last iteration is always captured
-    # regardless of whether max_iters aligns with eval_interval or save_interval
+    # --- Final eval, snippet and checkpoint ---
     final_iter = args.max_iters - 1
     print(f"\n--- Final Evaluation (iter {final_iter}) ---")
     final_val_loss = estimate_loss(
         model, args.val_path, args.eval_iters,
-        args.batch_size, config.block_size, device
+        args.batch_size, config.max_position_embeddings, device,
     )
     final_lr = get_lr(final_iter, args.warmup_iters, args.max_iters, args.lr)
     print(f"step {final_iter:6d} | val loss {final_val_loss:.4f} | lr {final_lr:.2e}")
@@ -267,23 +305,21 @@ def main():
                         args.checkpoint_dir, config, label="best")
         print(f"  >>> New best val loss: {best_val_loss:.4f}")
 
-    # Always save a 'final' checkpoint so resuming never loses progress
     save_checkpoint(model, optimizer, final_iter, final_val_loss,
                     args.checkpoint_dir, config, label="final")
 
-    # Save the tokenizer alongside the final checkpoint so the directory
-    # is fully self-contained — no external dependency on HuggingFace at inference time
     tokenizer_path = os.path.join(args.checkpoint_dir, "tokenizer")
     tokenizer.save_pretrained(tokenizer_path)
     print(f"  Tokenizer saved to: {tokenizer_path}")
-    
+
     generate_live_snippet(
         model, tokenizer, device, config,
-        args.gen_prompt, args.gen_len, final_iter
+        args.gen_prompt, args.gen_len, final_iter,
     )
 
     writer.close()
     print(f"Training complete. Best val loss: {best_val_loss:.4f}")
+
 
 if __name__ == "__main__":
     main()

@@ -1,7 +1,10 @@
 @echo off
-:: Set up Python 3.13 environment as Parallax was developed under.
+:: Set up Python 3.13 environment as Parallax was developed under it.
 :: You may need to edit this file to set the path to your global
 :: Python 3.13 location prior to execution of this batch script.
+:: Also, make sure you have the CUDA Toolkit 13.0 installed as your
+:: primary toolkit. Flash Attention 2 was compiled under these specific
+:: versions and using differing versions will cause a mismatch and errors.
 
 :: Create virtual environment
 echo "Creating virtual environment..."
@@ -52,9 +55,9 @@ echo call .venv\Scripts\activate.bat >> a.bat
 echo @echo off > d.bat
 echo call .venv\Scripts\deactivate.bat >> d.bat
 
-:: Upgrade pip version
-echo "Upgrading pip..."
-python.exe -m pip install --upgrade pip
+:: Upgrade pip and setuptools
+echo "Upgrading pip and setuptools..."
+python.exe -m pip install --upgrade pip setuptools
 
 :: Create requirements.txt file
 echo Writing requirements.txt...
@@ -91,8 +94,14 @@ echo "Installing other dependencies from requirements.txt... (this may take a wh
 pip install -r requirements.txt
 
 :: Install Flash Attention 2
-echo "Installing Flash Attention 2
+echo Installing Flash Attention 2
 pip install whl\flash_attn-2.8.3+cu130torch2.10.0cxx11abiTRUE-cp313-cp313-win_amd64.whl
+
+:: Install Parallax model package as an editable install so that
+:: "from model.parallax import ..." works from any script location
+:: without requiring sys.path manipulation.
+echo Installing Parallax as editable package...
+pip install -e .
 
 echo Virtual environment created and configured for Parallax as it was when developed under Windows 11.
 echo If using Microsoft Visual Studio Code, you can start by entering the below on the command line:

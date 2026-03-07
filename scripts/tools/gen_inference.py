@@ -138,29 +138,29 @@ else:
     print(f"  Type:    unknown format — attempting direct config load")
 
 if args.block_size_override:
-    cfg_dict["block_size"] = args.block_size_override
-    print(f"  block_size overridden → {args.block_size_override}")
+    cfg_dict["max_position_embeddings"] = args.block_size_override
+    print(f"  max_position_embeddings overridden → {args.block_size_override}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Build model
 # ─────────────────────────────────────────────────────────────────────────────
 sys.path.insert(0, os.getcwd())
 try:
-    from model.parallax.modeling_parallax import Parallax
-    from model.parallax.configuration_parallax import ParallaxConfig
+    from model.parallax import ParallaxConfig, ParallaxForCausalLM
 except ImportError as e:
     print(f"\nERROR: Cannot import Parallax — run from your project directory.\n({e})")
     sys.exit(1)
 
-valid_fields = ParallaxConfig.__dataclass_fields__.keys()
-config = ParallaxConfig(**{k: v for k, v in cfg_dict.items() if k in valid_fields})
+# ParallaxConfig accepts both old-style (legacy field names) and new-style
+# (HF field names) config dicts via its legacy alias kwargs.
+config = ParallaxConfig(**cfg_dict)
 
-print(f"\n  Config:  n_layer={config.n_layer}, n_embd={config.n_embd}, "
-      f"n_head={config.n_head}, n_kv_heads={config.n_kv_heads}")
-print(f"           vocab={config.vocab_size}, block_size={config.block_size}, "
-      f"ffn_dim={config.ffn_dim}")
+print(f"\n  Config:  num_hidden_layers={config.num_hidden_layers}, hidden_size={config.hidden_size}, "
+      f"num_attention_heads={config.num_attention_heads}, num_key_value_heads={config.num_key_value_heads}")
+print(f"           vocab={config.vocab_size}, max_position_embeddings={config.max_position_embeddings}, "
+      f"intermediate_size={config.intermediate_size}")
 
-model = Parallax(config)
+model = ParallaxForCausalLM(config)
 total_params = sum(p.numel() for p in model.parameters())
 print(f"  Params:  {total_params/1e6:.2f}M")
 
@@ -178,7 +178,7 @@ total   = len(model.state_dict())
 print(f"  Loaded:  {loaded}/{total} keys ({100*loaded/total:.1f}%)")
 if result.missing_keys:
     non_freq = [k for k in result.missing_keys
-                if k not in ("freqs_cos", "freqs_sin")]
+                if k not in ("model.freqs_cos", "model.freqs_sin")]
     if non_freq:
         print(f"  WARNING: {len(non_freq)} unexpected missing keys:")
         for k in non_freq[:5]:
@@ -286,15 +286,15 @@ def generate(prompt_text, system_text=""):
     input_ids   = tokenizer.encode(formatted, return_tensors="pt").to(device)
     prompt_len  = input_ids.shape[1]
 
-    if prompt_len >= config.block_size:
-        print(f"  WARNING: prompt ({prompt_len} tokens) >= block_size ({config.block_size})")
+    if prompt_len >= config.max_position_embeddings:
+        print(f"  WARNING: prompt ({prompt_len} tokens) >= max_position_embeddings ({config.max_position_embeddings})")
 
     generated     = input_ids.clone()
     recent_tokens = []
 
     with torch.no_grad():
         for _ in range(args.max_new_tokens):
-            ctx = generated[:, -config.block_size:]
+            ctx = generated[:, -config.max_position_embeddings:]
             with torch.amp.autocast(device_type=device.split(":")[0],
                                     dtype=torch.float16,
                                     enabled=(device == "cuda")):

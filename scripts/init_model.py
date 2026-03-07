@@ -1,18 +1,19 @@
-# Initialize an "empty" model
+# Initialize an "empty" model as a baseline checkpoint.
 
 import os
 import torch
 
 from safetensors.torch import save_file
 
-from model.parallax.modeling_parallax import Parallax
-from model.parallax.configuration_parallax import ParallaxConfig
+from model.parallax import ParallaxConfig, ParallaxForCausalLM
+
 
 def count_parameters(model):
     total_params = sum(p.numel() for p in model.parameters())
     # Non-embedding params are often a better measure of "intelligence"
-    non_emb_params = total_params - model.tok_emb.weight.numel()
+    non_emb_params = total_params - model.model.embed_tokens.weight.numel()
     return total_params, non_emb_params
+
 
 def estimate_vram_usage(model):
     # Rough estimate: Weights (FP16) + Optimizer States (AdamW FP32: 2 states per param)
@@ -28,35 +29,44 @@ def estimate_vram_usage(model):
     print(f"Remaining for Acts/Buf: ~{remaining_mb:.2f} MB")
     print("-" * 37)
 
+
 def main():
     config = ParallaxConfig()
-    model = Parallax(config)
-    
-    total, non_emb = count_parameters(model)
-    
-    print(f"\n[Parallax Configuration]")
-    print(f"Total Parameters:         {total/1e6:.2f}M")
-    print(f"Non-Embedding Parameters: {non_emb/1e6:.2f}M")
+    model  = ParallaxForCausalLM(config)
 
+    total, non_emb = count_parameters(model)
+
+    print(f"\n[Parallax Configuration]")
+    print(f"  hidden_size:             {config.hidden_size}")
+    print(f"  num_hidden_layers:       {config.num_hidden_layers}  (per track)")
+    print(f"  num_attention_heads:     {config.num_attention_heads}")
+    print(f"  num_key_value_heads:     {config.num_key_value_heads}")
+    print(f"  max_position_embeddings: {config.max_position_embeddings}")
+    print(f"  vocab_size:              {config.vocab_size}")
+    print(f"  num_loops:               {config.num_loops}  (use_swap={config.use_swap})")
+    print(f"  Total Parameters:        {total / 1e6:.2f}M")
+    print(f"  Non-Embedding Params:    {non_emb / 1e6:.2f}M")
+    print()
     estimate_vram_usage(model)
 
     # Save the blank (untrained) model weights
-    init_dir = 'checkpoints/parallax_v1/initial'
+    init_dir = "checkpoints/parallax_v1/initial"
     os.makedirs(init_dir, exist_ok=True)
 
     weights_path = os.path.join(init_dir, "model_blank.safetensors")
     save_file(model.state_dict(), weights_path)
-    
-    # Save metadata as a plain dict to avoid import-path dependencies at load time
-    # Using config.__dict__ means loading this file only needs torch, not the config module
+
+    # Use config.to_dict() (PretrainedConfig method) so all canonical HF field
+    # names are stored and the meta is consistent with checkpoints from train.py.
     meta = {
-        'iter': 0,
-        'loss': 0.0,
-        'config': config.__dict__
+        "iter":   0,
+        "loss":   0.0,
+        "config": config.to_dict(),
     }
     torch.save(meta, os.path.join(init_dir, "meta_blank.pt"))
 
     print(f"\nSuccessfully saved blank baseline to: {init_dir}")
+
 
 if __name__ == "__main__":
     main()
