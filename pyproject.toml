@@ -9,6 +9,22 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "parallax"
 version = "0.1.0"
+description = "Parallax: A dual-track language model architecture with cross-track swap mechanism"
+license = {text = "AGPL-3.0-or-later"}
+authors = [
+    {name = "Bryan K Reinhart"}
+]
+maintainers = [
+    {name = "Bryan K Reinhart"}
+]
+keywords = ["machine learning", "language model", "transformers", "NLP", "deep learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
