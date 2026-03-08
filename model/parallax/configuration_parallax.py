@@ -80,7 +80,7 @@ class ParallaxConfig(PretrainedConfig):
         num_attention_heads: int      = 8,
         num_key_value_heads: int      = 2,
         intermediate_size: int        = 0,
-        max_position_embeddings: int  = 512,
+        max_position_embeddings: int  = 1024,
         rope_theta: float             = 5.0,
         attention_dropout: float      = 0.0,
         attention_bias: bool          = False,

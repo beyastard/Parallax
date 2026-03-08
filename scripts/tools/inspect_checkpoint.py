@@ -1,4 +1,4 @@
-# scripts/tools/diag.py
+# scripts/tools/inspect_checkpoint.py
 #
 # Copyright (C) 2025-2026 Bryan K Reinhart & BeySoft
 #
