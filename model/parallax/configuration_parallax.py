@@ -89,44 +89,8 @@ class ParallaxConfig(PretrainedConfig):
         num_loops: int                = 2,
         use_swap: bool                = True,
         tie_word_embeddings: bool     = False,
-        # ── Legacy aliases ────────────────────────────────────────────────────
-        # These are accepted for backwards-compatibility with checkpoints that
-        # were saved before the HF rename.  They are silently mapped to the
-        # canonical HF names and are NOT stored as separate attributes.
-        block_size: int               = None,
-        n_embd: int                   = None,
-        n_layer: int                  = None,
-        n_head: int                   = None,
-        n_kv_heads: int               = None,
-        ffn_dim: int                  = None,
-        norm_eps: float               = None,
-        dropout: float                = None,
-        bias: bool                    = None,
-        activation: str               = None,
         **kwargs,
     ):
-        # ── Apply legacy aliases (old name wins only when new name is still at
-        #    its default, so explicit new-name kwargs always take precedence) ──
-        if block_size is not None:
-            max_position_embeddings = block_size
-        if n_embd is not None:
-            hidden_size = n_embd
-        if n_layer is not None:
-            num_hidden_layers = n_layer
-        if n_head is not None:
-            num_attention_heads = n_head
-        if n_kv_heads is not None:
-            num_key_value_heads = n_kv_heads
-        if ffn_dim is not None:
-            intermediate_size = ffn_dim
-        if norm_eps is not None:
-            rms_norm_eps = norm_eps
-        if dropout is not None:
-            attention_dropout = dropout
-        if bias is not None:
-            attention_bias = bias
-        if activation is not None:
-            hidden_act = activation
         # Auto-compute intermediate_size if not specified (SwiGLU standard: 2/3 * 4 * hidden)
         if intermediate_size == 0 or intermediate_size is None:
             intermediate_size = int(2 / 3 * 4 * hidden_size)
@@ -149,44 +113,3 @@ class ParallaxConfig(PretrainedConfig):
         self.use_swap                = use_swap
 
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
-
-    # ── Read-only shims so existing code that reads the old names still works ─
-    @property
-    def block_size(self) -> int:
-        return self.max_position_embeddings
-
-    @property
-    def n_embd(self) -> int:
-        return self.hidden_size
-
-    @property
-    def n_layer(self) -> int:
-        return self.num_hidden_layers
-
-    @property
-    def n_head(self) -> int:
-        return self.num_attention_heads
-
-    @property
-    def n_kv_heads(self) -> int:
-        return self.num_key_value_heads
-
-    @property
-    def ffn_dim(self) -> int:
-        return self.intermediate_size
-
-    @property
-    def norm_eps(self) -> float:
-        return self.rms_norm_eps
-
-    @property
-    def dropout(self) -> float:
-        return self.attention_dropout
-
-    @property
-    def bias(self) -> bool:
-        return self.attention_bias
-
-    @property
-    def activation(self) -> str:
-        return self.hidden_act

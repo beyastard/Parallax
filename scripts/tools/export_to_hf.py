@@ -21,9 +21,8 @@
 
 import os
 import argparse
-import shutil
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file
 from transformers import AutoTokenizer
 from model.parallax import ParallaxConfig, ParallaxForCausalLM
 
