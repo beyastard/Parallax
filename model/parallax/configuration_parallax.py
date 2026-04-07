@@ -31,14 +31,14 @@ class ParallaxConfig(PretrainedConfig):
 
     Args:
         vocab_size (int): Vocabulary size. Default: 32000 (Llama 2 tokenizer).
-        hidden_size (int): Embedding dimension and hidden state size. Default: 512.
-        num_hidden_layers (int): Number of transformer blocks *per track*. Default: 6.
+        hidden_size (int): Embedding dimension and hidden state size. Default: 384.
+        num_hidden_layers (int): Number of transformer blocks *per track*. Default: 16.
         num_attention_heads (int): Number of query attention heads. Default: 8.
-        num_key_value_heads (int): Number of key/value heads for GQA. Default: 4.
+        num_key_value_heads (int): Number of key/value heads for GQA. Default: 2.
             Set equal to num_attention_heads for standard MHA.
         intermediate_size (int): FFN intermediate (hidden) dimension. Default: 0.
             When 0, computed automatically as int(2/3 * 4 * hidden_size) (SwiGLU default).
-        max_position_embeddings (int): Maximum sequence length (context window). Default: 512.
+        max_position_embeddings (int): Maximum sequence length (context window). Default: 1024.
         rope_theta (float): RoPE base frequency. Default: 10000.0.
         attention_dropout (float): Dropout probability in attention. Default: 0.0.
         attention_bias (bool): Whether to use bias in attention projections. Default: False.
@@ -71,17 +71,22 @@ class ParallaxConfig(PretrainedConfig):
     """
 
     model_type = "parallax"
+    
+    # Default configuration:
+    #    Total Parameters:     74.15M
+    #    Non-Embedding Params: 61.86M
+    #    Reference: https://huggingface.co/blog/codelion/optimal-model-architecture
 
     def __init__(
         self,
         vocab_size: int               = 32000,
-        hidden_size: int              = 512,
-        num_hidden_layers: int        = 6,
+        hidden_size: int              = 384,
+        num_hidden_layers: int        = 16,
         num_attention_heads: int      = 8,
         num_key_value_heads: int      = 2,
         intermediate_size: int        = 0,
         max_position_embeddings: int  = 1024,
-        rope_theta: float             = 5.0,
+        rope_theta: float             = 10000.0,
         attention_dropout: float      = 0.0,
         attention_bias: bool          = False,
         hidden_act: str               = "swiglu",

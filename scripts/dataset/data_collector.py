@@ -48,7 +48,7 @@ def get_text_column(first_example, preferred_name="text"):
     if preferred_name in columns:
         return preferred_name
 
-    candidates = ["content", "body", "story", "document", "raw_text"]
+    candidates = ["text", "content", "body", "story", "document", "raw_text"]
     for cand in candidates:
         if cand in columns:
             print(f"Warning: Column '{preferred_name}' not found. Using '{cand}' instead.")
